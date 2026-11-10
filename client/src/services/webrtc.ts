@@ -2,13 +2,44 @@ import { io, Socket } from 'socket.io-client';
 import type { FileMeta, Peer, TransferProgress } from '../types';
 import { CHUNK_SIZE, formatBytes } from '../utils/helpers';
 
-const ICE_SERVERS = {
-  iceServers: [
+// STUN and TURN configuration for 100% reliable NAT traversal across firewalls (Jio/Airtel 5G, College WiFi, etc.)
+function getIceServers(): RTCConfiguration {
+  const customTurnUrl = import.meta.env.VITE_TURN_SERVER_URL;
+  const customTurnUsername = import.meta.env.VITE_TURN_USERNAME;
+  const customTurnCredential = import.meta.env.VITE_TURN_CREDENTIAL;
+
+  const iceServers: RTCIceServer[] = [
+    // 1. Google Public STUN (Fast, direct P2P resolution)
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-  ],
-};
+    { urls: 'stun:openrelay.metered.ca:80' },
+  ];
+
+  if (customTurnUrl && customTurnUsername && customTurnCredential) {
+    // 2. Personal Metered.ca TURN credentials if provided in .env
+    iceServers.push({
+      urls: customTurnUrl,
+      username: customTurnUsername,
+      credential: customTurnCredential,
+    });
+  } else {
+    // 3. OpenRelay (by Metered.ca) - Free Community TURN Fallback
+    iceServers.push(
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      },
+      {
+        urls: 'turns:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      }
+    );
+  }
+
+  return { iceServers };
+}
 
 export class WebRTCManager {
   private socket: Socket;
@@ -114,7 +145,7 @@ export class WebRTCManager {
 
   // Initiate peer connection
   private initiatePeerConnection(targetSocketId: string, isInitiator: boolean): RTCPeerConnection {
-    const pc = new RTCPeerConnection(ICE_SERVERS);
+    const pc = new RTCPeerConnection(getIceServers());
     this.peerConnections.set(targetSocketId, pc);
 
     // ICE Candidate Exchange
