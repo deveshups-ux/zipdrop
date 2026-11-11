@@ -42,3 +42,29 @@ export function generateRoomCode(): string {
   }
   return code;
 }
+
+/**
+ * Security: Sanitize untrusted filenames received over the network
+ * Prevents Directory Traversal (../), control characters, and injection
+ */
+export function sanitizeFileName(fileName: string): string {
+  if (!fileName || typeof fileName !== 'string') return `file_${Date.now()}`;
+  // 1. Remove dangerous path traversal & reserved filesystem characters
+  let clean = fileName.replace(/[/\\?%*:|"<>]/g, '_');
+  clean = clean.replace(/\.\./g, '_');
+  // 2. Strip non-printable / control characters
+  clean = clean.replace(/[\x00-\x1f\x80-\x9f]/g, '');
+  // 3. Trim whitespace
+  clean = clean.trim();
+  // 4. Max length protection (255 chars limit across Windows/Linux/macOS)
+  if (clean.length > 255) {
+    const extIndex = clean.lastIndexOf('.');
+    if (extIndex !== -1 && extIndex > 240) {
+      const ext = clean.substring(extIndex);
+      clean = clean.substring(0, 255 - ext.length) + ext;
+    } else {
+      clean = clean.substring(0, 255);
+    }
+  }
+  return clean || `file_${Date.now()}`;
+}

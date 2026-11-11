@@ -8,7 +8,7 @@ import { ScannerModal } from './components/ScannerModal';
 import { IncomingModal } from './components/IncomingModal';
 import { WebRTCManager } from './services/webrtc';
 import type { BatchMeta, Peer, TransferProgress } from './types';
-import { generateRoomCode, getDeviceDetails } from './utils/helpers';
+import { generateRoomCode, getDeviceDetails, sanitizeFileName } from './utils/helpers';
 import { ShieldCheck, Wifi, Zap, Lock } from 'lucide-react';
 
 function getSignalingUrl(): string {
@@ -69,7 +69,8 @@ export function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = fileName;
+      const safeName = sanitizeFileName(fileName);
+      a.download = safeName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
