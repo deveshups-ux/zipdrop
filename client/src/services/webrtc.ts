@@ -1,5 +1,5 @@
 import { io, Socket } from 'socket.io-client';
-import type { FileMeta, Peer, TransferProgress } from '../types';
+import type { BatchMeta, FileMeta, Peer, TransferProgress } from '../types';
 import { CHUNK_SIZE, formatBytes } from '../utils/helpers';
 
 // STUN and TURN configuration for 100% reliable NAT traversal across firewalls (Jio/Airtel 5G, College WiFi, etc.)
@@ -46,24 +46,26 @@ export class WebRTCManager {
   private peerConnections = new Map<string, RTCPeerConnection>();
   private dataChannels = new Map<string, RTCDataChannel>();
 
-  // Receiving file states
-  private receivingFiles = new Map<
-    string,
-    {
-      meta: FileMeta;
-      chunks: ArrayBuffer[];
-      bytesReceived: number;
-      startTime: number;
-    }
-  >();
+  // Receiving state for queue / batch
+  private activeReceivingBatch: {
+    batchId: string;
+    fileIndex: number;
+    totalFiles: number;
+    totalBatchBytes: number;
+    batchBytesPrior: number;
+    meta: FileMeta;
+    chunks: ArrayBuffer[];
+    bytesReceived: number;
+    startTime: number;
+  } | null = null;
 
   // Event callbacks
   public onPeersUpdate?: (peers: Peer[]) => void;
   public onPeerJoined?: (peer: Peer) => void;
   public onPeerLeft?: (socketId: string) => void;
   public onProgress?: (progress: TransferProgress) => void;
-  public onFileReceived?: (fileName: string, blob: Blob) => void;
-  public onIncomingRequest?: (senderSocketId: string, fileMeta: FileMeta) => void;
+  public onFileReceived?: (fileName: string, blob: Blob, fileIndex: number, totalFiles: number) => void;
+  public onIncomingRequest?: (senderSocketId: string, batchMeta: BatchMeta) => void;
   public onTransferResponse?: (accepted: boolean) => void;
 
   constructor(serverUrl: string) {
@@ -129,8 +131,8 @@ export class WebRTCManager {
       }
     });
 
-    // File transfer prompts
-    this.socket.on('transfer-request', ({ senderSocketId, fileMeta }: { senderSocketId: string; fileMeta: FileMeta }) => {
+    // Batch transfer prompts
+    this.socket.on('transfer-request', ({ senderSocketId, fileMeta }: { senderSocketId: string; fileMeta: BatchMeta }) => {
       if (this.onIncomingRequest) {
         this.onIncomingRequest(senderSocketId, fileMeta);
       }
@@ -215,97 +217,142 @@ export class WebRTCManager {
 
         if (message.type === 'header') {
           const meta: FileMeta = message.meta;
-          this.receivingFiles.set(meta.id, {
+          this.activeReceivingBatch = {
+            batchId: message.batchId,
+            fileIndex: message.fileIndex,
+            totalFiles: message.totalFiles,
+            totalBatchBytes: message.totalBatchBytes,
+            batchBytesPrior: message.batchBytesPrior,
             meta,
             chunks: [],
             bytesReceived: 0,
             startTime: Date.now(),
-          });
+          };
 
           if (this.onProgress) {
             this.onProgress({
+              batchId: message.batchId,
+              currentFileIndex: message.fileIndex,
+              totalFiles: message.totalFiles,
               fileId: meta.id,
               fileName: meta.name,
               fileSize: meta.size,
               progress: 0,
+              totalBatchProgress: Math.round((message.batchBytesPrior / message.totalBatchBytes) * 100),
               bytesTransferred: 0,
+              totalBytesTransferred: message.batchBytesPrior,
+              totalBatchBytes: message.totalBatchBytes,
               speed: '0 B/s',
               type: 'receiving',
               status: 'transferring',
             });
           }
         } else if (message.type === 'complete') {
-          const fileData = this.receivingFiles.get(message.fileId);
-          if (fileData) {
-            const blob = new Blob(fileData.chunks, { type: fileData.meta.type || 'application/octet-stream' });
+          const batch = this.activeReceivingBatch;
+          if (batch && batch.meta.id === message.fileId) {
+            const blob = new Blob(batch.chunks, { type: batch.meta.type || 'application/octet-stream' });
+
+            const isLast = message.isLastFile;
 
             if (this.onProgress) {
               this.onProgress({
-                fileId: fileData.meta.id,
-                fileName: fileData.meta.name,
-                fileSize: fileData.meta.size,
+                batchId: batch.batchId,
+                currentFileIndex: batch.fileIndex,
+                totalFiles: batch.totalFiles,
+                fileId: batch.meta.id,
+                fileName: batch.meta.name,
+                fileSize: batch.meta.size,
                 progress: 100,
-                bytesTransferred: fileData.meta.size,
-                speed: 'Done',
+                totalBatchProgress: isLast ? 100 : Math.round(((batch.batchBytesPrior + batch.meta.size) / batch.totalBatchBytes) * 100),
+                bytesTransferred: batch.meta.size,
+                totalBytesTransferred: batch.batchBytesPrior + batch.meta.size,
+                totalBatchBytes: batch.totalBatchBytes,
+                speed: isLast ? 'All Done' : 'Next File...',
                 type: 'receiving',
-                status: 'completed',
+                status: isLast ? 'completed' : 'transferring',
               });
             }
 
             if (this.onFileReceived) {
-              this.onFileReceived(fileData.meta.name, blob);
+              this.onFileReceived(batch.meta.name, blob, batch.fileIndex, batch.totalFiles);
             }
 
-            this.receivingFiles.delete(message.fileId);
+            // Clear chunks array immediately to release browser memory
+            batch.chunks = [];
+
+            if (isLast) {
+              this.activeReceivingBatch = null;
+            }
           }
         }
       } catch (err) {
         console.error('Error parsing JSON message on data channel:', err);
       }
     } else if (data instanceof ArrayBuffer) {
-      // Find the active receiving file (last added)
-      const activeFile = Array.from(this.receivingFiles.values())[0];
-      if (activeFile) {
-        activeFile.chunks.push(data);
-        activeFile.bytesReceived += data.byteLength;
+      const batch = this.activeReceivingBatch;
+      if (batch) {
+        batch.chunks.push(data);
+        batch.bytesReceived += data.byteLength;
 
-        const progressPercent = Math.min(100, Math.round((activeFile.bytesReceived / activeFile.meta.size) * 100));
-        const timeElapsed = (Date.now() - activeFile.startTime) / 1000 || 1;
-        const bytesPerSec = activeFile.bytesReceived / timeElapsed;
+        const filePercent = Math.min(100, Math.round((batch.bytesReceived / batch.meta.size) * 100));
+        const totalBytesSoFar = batch.batchBytesPrior + batch.bytesReceived;
+        const totalBatchPercent = Math.min(100, Math.round((totalBytesSoFar / batch.totalBatchBytes) * 100));
+
+        const timeElapsed = (Date.now() - batch.startTime) / 1000 || 1;
+        const bytesPerSec = batch.bytesReceived / timeElapsed;
         const speedFormatted = `${formatBytes(bytesPerSec)}/s`;
 
         if (this.onProgress) {
           this.onProgress({
-            fileId: activeFile.meta.id,
-            fileName: activeFile.meta.name,
-            fileSize: activeFile.meta.size,
-            progress: progressPercent,
-            bytesTransferred: activeFile.bytesReceived,
+            batchId: batch.batchId,
+            currentFileIndex: batch.fileIndex,
+            totalFiles: batch.totalFiles,
+            fileId: batch.meta.id,
+            fileName: batch.meta.name,
+            fileSize: batch.meta.size,
+            progress: filePercent,
+            totalBatchProgress: totalBatchPercent,
+            bytesTransferred: batch.bytesReceived,
+            totalBytesTransferred: totalBytesSoFar,
+            totalBatchBytes: batch.totalBatchBytes,
             speed: speedFormatted,
             type: 'receiving',
-            status: progressPercent === 100 ? 'completed' : 'transferring',
+            status: 'transferring',
           });
         }
       }
     }
   }
 
-  // Request to send file
-  public requestSendFile(targetSocketId: string, file: File) {
-    const meta: FileMeta = {
-      id: Math.random().toString(36).substring(2, 9),
-      name: file.name,
-      size: file.size,
-      type: file.type,
-      totalChunks: Math.ceil(file.size / CHUNK_SIZE),
+  // Request to send multiple files (Batch)
+  public requestSendBatch(targetSocketId: string, files: File[]): BatchMeta {
+    const batchId = Math.random().toString(36).substring(2, 9);
+    let totalBytes = 0;
+
+    const filesMeta: FileMeta[] = files.map((file) => {
+      totalBytes += file.size;
+      return {
+        id: Math.random().toString(36).substring(2, 9),
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        totalChunks: Math.ceil(file.size / CHUNK_SIZE),
+      };
+    });
+
+    const batchMeta: BatchMeta = {
+      batchId,
+      totalFiles: files.length,
+      totalBytes,
+      files: filesMeta,
     };
 
     this.socket.emit('transfer-request', {
       targetSocketId,
-      fileMeta: meta,
+      fileMeta: batchMeta,
     });
 
-    return meta;
+    return batchMeta;
   }
 
   public respondTransfer(targetSocketId: string, accepted: boolean) {
@@ -315,63 +362,105 @@ export class WebRTCManager {
     });
   }
 
-  // Send file chunks with Backpressure Control
-  public async sendFile(targetSocketId: string, file: File, meta: FileMeta) {
+  // Send batch files sequentially in a queue with Backpressure Control
+  public async sendBatch(targetSocketId: string, files: File[], batchMeta: BatchMeta) {
     const dc = this.dataChannels.get(targetSocketId);
     if (!dc || dc.readyState !== 'open') {
-      throw new Error('Data Channel is not open. Cannot transfer file.');
+      throw new Error('Data Channel is not open. Cannot transfer files.');
     }
-
-    // 1. Send Header
-    dc.send(JSON.stringify({ type: 'header', meta }));
-
-    const startTime = Date.now();
-    let offset = 0;
-    let bytesSent = 0;
 
     // Set buffer threshold for backpressure (64 KB)
     dc.bufferedAmountLowThreshold = 65536;
 
-    while (offset < file.size) {
-      // BACKPRESSURE CHECK: If buffer is full (> 512 KB), wait for it to drain
-      if (dc.bufferedAmount > 524288) {
-        await new Promise<void>((resolve) => {
-          dc.onbufferedamountlow = () => {
-            dc.onbufferedamountlow = null;
-            resolve();
-          };
-        });
+    let totalBytesSentOverall = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const meta = batchMeta.files[i];
+      const isLastFile = i === files.length - 1;
+      const batchBytesPrior = totalBytesSentOverall;
+
+      // 1. Send File Header Packet
+      dc.send(
+        JSON.stringify({
+          type: 'header',
+          batchId: batchMeta.batchId,
+          fileIndex: i + 1,
+          totalFiles: batchMeta.totalFiles,
+          totalBatchBytes: batchMeta.totalBytes,
+          batchBytesPrior,
+          meta,
+        })
+      );
+
+      const fileStartTime = Date.now();
+      let offset = 0;
+      let fileBytesSent = 0;
+
+      while (offset < file.size) {
+        // BACKPRESSURE CHECK: If buffer is full (> 512 KB), wait for it to drain
+        if (dc.bufferedAmount > 524288) {
+          await new Promise<void>((resolve) => {
+            dc.onbufferedamountlow = () => {
+              dc.onbufferedamountlow = null;
+              resolve();
+            };
+          });
+        }
+
+        const slice = file.slice(offset, offset + CHUNK_SIZE);
+        const buffer = await slice.arrayBuffer();
+
+        dc.send(buffer);
+
+        offset += buffer.byteLength;
+        fileBytesSent += buffer.byteLength;
+        const currentTotalBytes = batchBytesPrior + fileBytesSent;
+
+        const filePercent = Math.min(100, Math.round((fileBytesSent / file.size) * 100));
+        const totalBatchPercent = Math.min(100, Math.round((currentTotalBytes / batchMeta.totalBytes) * 100));
+
+        const timeElapsed = (Date.now() - fileStartTime) / 1000 || 1;
+        const bytesPerSec = fileBytesSent / timeElapsed;
+        const speedFormatted = `${formatBytes(bytesPerSec)}/s`;
+
+        if (this.onProgress) {
+          this.onProgress({
+            batchId: batchMeta.batchId,
+            currentFileIndex: i + 1,
+            totalFiles: batchMeta.totalFiles,
+            fileId: meta.id,
+            fileName: file.name,
+            fileSize: file.size,
+            progress: filePercent,
+            totalBatchProgress: totalBatchPercent,
+            bytesTransferred: fileBytesSent,
+            totalBytesTransferred: currentTotalBytes,
+            totalBatchBytes: batchMeta.totalBytes,
+            speed: speedFormatted,
+            type: 'sending',
+            status: isLastFile && filePercent === 100 ? 'completed' : 'transferring',
+          });
+        }
       }
 
-      const slice = file.slice(offset, offset + CHUNK_SIZE);
-      const buffer = await slice.arrayBuffer();
+      totalBytesSentOverall += file.size;
 
-      dc.send(buffer);
-
-      offset += buffer.byteLength;
-      bytesSent += buffer.byteLength;
-
-      const progressPercent = Math.min(100, Math.round((bytesSent / file.size) * 100));
-      const timeElapsed = (Date.now() - startTime) / 1000 || 1;
-      const bytesPerSec = bytesSent / timeElapsed;
-      const speedFormatted = `${formatBytes(bytesPerSec)}/s`;
-
-      if (this.onProgress) {
-        this.onProgress({
+      // 2. Send Complete packet for this file
+      dc.send(
+        JSON.stringify({
+          type: 'complete',
+          batchId: batchMeta.batchId,
           fileId: meta.id,
-          fileName: file.name,
-          fileSize: file.size,
-          progress: progressPercent,
-          bytesTransferred: bytesSent,
-          speed: speedFormatted,
-          type: 'sending',
-          status: progressPercent === 100 ? 'completed' : 'transferring',
-        });
+          isLastFile,
+        })
+      );
+
+      // Small 50ms pause between files to give the receiver's disk/event loop time to process
+      if (!isLastFile) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
       }
     }
-
-    // 2. Send Complete packet
-    dc.send(JSON.stringify({ type: 'complete', fileId: meta.id }));
   }
 
   private closePeer(socketId: string) {

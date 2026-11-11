@@ -6,7 +6,7 @@ import { TransferModal } from './components/TransferModal';
 import { QRModal } from './components/QRModal';
 import { IncomingModal } from './components/IncomingModal';
 import { WebRTCManager } from './services/webrtc';
-import type { FileMeta, Peer, TransferProgress } from './types';
+import type { BatchMeta, Peer, TransferProgress } from './types';
 import { generateRoomCode, getDeviceDetails } from './utils/helpers';
 import { ShieldCheck, Wifi, Zap } from 'lucide-react';
 
@@ -21,13 +21,13 @@ export function App() {
 
   // Transfer states
   const [activeTransfer, setActiveTransfer] = useState<TransferProgress | null>(null);
-  const [incomingRequest, setIncomingRequest] = useState<{ senderSocketId: string; fileMeta: FileMeta } | null>(null);
+  const [incomingRequest, setIncomingRequest] = useState<{ senderSocketId: string; batchMeta: BatchMeta } | null>(null);
 
   // Device Info
   const [deviceInfo] = useState(getDeviceDetails());
 
   const webrtcRef = useRef<WebRTCManager | null>(null);
-  const pendingFileRef = useRef<{ peer: Peer; file: File; meta: FileMeta } | null>(null);
+  const pendingBatchRef = useRef<{ peer: Peer; files: File[]; batchMeta: BatchMeta } | null>(null);
 
   useEffect(() => {
     // 1. Determine Room ID (from URL parameter or generate fresh)
@@ -69,7 +69,7 @@ export function App() {
     };
 
     manager.onFileReceived = (fileName, blob) => {
-      // Automatic download trigger
+      // Automatic download trigger for each received file
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -80,24 +80,24 @@ export function App() {
       URL.revokeObjectURL(url);
     };
 
-    manager.onIncomingRequest = (senderSocketId, fileMeta) => {
-      setIncomingRequest({ senderSocketId, fileMeta });
+    manager.onIncomingRequest = (senderSocketId, batchMeta) => {
+      setIncomingRequest({ senderSocketId, batchMeta });
     };
 
     manager.onTransferResponse = async (accepted) => {
-      if (accepted && pendingFileRef.current) {
-        const { peer, file, meta } = pendingFileRef.current;
+      if (accepted && pendingBatchRef.current) {
+        const { peer, files, batchMeta } = pendingBatchRef.current;
         try {
-          await manager.sendFile(peer.socketId, file, meta);
+          await manager.sendBatch(peer.socketId, files, batchMeta);
         } catch (err) {
           console.error('File send error:', err);
-          alert('Failed to send file. Check connection.');
+          alert('Failed to send files. Check connection.');
         } finally {
-          pendingFileRef.current = null;
+          pendingBatchRef.current = null;
         }
       } else {
         alert('File transfer was declined by the receiver.');
-        pendingFileRef.current = null;
+        pendingBatchRef.current = null;
       }
     };
 
@@ -114,10 +114,10 @@ export function App() {
     setSelectedPeer((prev) => (prev?.socketId === peer.socketId ? null : peer));
   };
 
-  const handleSendFile = (peer: Peer, file: File) => {
-    if (!webrtcRef.current) return;
-    const meta = webrtcRef.current.requestSendFile(peer.socketId, file);
-    pendingFileRef.current = { peer, file, meta };
+  const handleSendFiles = (peer: Peer, files: File[]) => {
+    if (!webrtcRef.current || files.length === 0) return;
+    const batchMeta = webrtcRef.current.requestSendBatch(peer.socketId, files);
+    pendingBatchRef.current = { peer, files, batchMeta };
   };
 
   const handleAcceptIncoming = () => {
@@ -156,8 +156,8 @@ export function App() {
           }}
         />
 
-        {/* Drop Zone */}
-        <DropZone selectedPeer={selectedPeer} onSendFile={handleSendFile} />
+        {/* Multi-File Drop Zone */}
+        <DropZone selectedPeer={selectedPeer} onSendFiles={handleSendFiles} />
 
         {/* Feature Badges */}
         <div className="mt-8 flex flex-wrap items-center justify-center gap-6 text-xs text-gray-500 font-medium">
@@ -171,7 +171,7 @@ export function App() {
           </div>
           <div className="flex items-center gap-1.5">
             <Zap className="w-4 h-4 text-blue-400" />
-            <span>0 Byte Stored on Server</span>
+            <span>Multi-File Queue Engine</span>
           </div>
         </div>
       </main>
