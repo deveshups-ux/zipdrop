@@ -9,6 +9,7 @@ import { IncomingModal } from './components/IncomingModal';
 import { WebRTCManager } from './services/webrtc';
 import type { BatchMeta, Peer, TransferProgress } from './types';
 import { generateRoomCode, getDeviceDetails, sanitizeFileName, isFileSystemAccessSupported, isDirectoryPickerSupported } from './utils/helpers';
+import { wakeLockManager } from './utils/wakeLock';
 import { ShieldCheck, Wifi, Zap, Lock } from 'lucide-react';
 
 function getSignalingUrl(): string {
@@ -149,6 +150,19 @@ export function App() {
       }
     };
   }, [connectToRoom]);
+
+  // Manage Screen Wake Lock during active transfers
+  useEffect(() => {
+    if (activeTransfer && activeTransfer.status === 'transferring') {
+      wakeLockManager.acquire();
+    } else {
+      wakeLockManager.release();
+    }
+
+    return () => {
+      wakeLockManager.release();
+    };
+  }, [activeTransfer?.status]);
 
   // Actions
   const handleSelectPeer = (peer: Peer) => {

@@ -1,8 +1,9 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowUpRight, ArrowDownLeft, CheckCircle2, Zap, Files, HardDrive } from 'lucide-react';
+import { ArrowUpRight, ArrowDownLeft, CheckCircle2, Zap, Files, HardDrive, Sun } from 'lucide-react';
 import type { TransferProgress } from '../types';
 import { formatBytes } from '../utils/helpers';
+import { wakeLockManager } from '../utils/wakeLock';
 
 interface TransferModalProps {
   transfer: TransferProgress | null;
@@ -89,6 +90,17 @@ export const TransferModal: React.FC<TransferModalProps> = ({ transfer, onClose 
                   <span>Memory Buffer (Blob)</span>
                 </span>
               )}
+            </div>
+          )}
+
+          {/* Wake Lock Active Indicator */}
+          {wakeLockManager.isSupported() && !isDone && (
+            <div className="mb-3 flex items-center justify-between px-3 py-1.5 rounded-xl bg-amber-950/30 border border-amber-800/30 text-[11px]">
+              <span className="text-gray-400">Power State</span>
+              <span className="flex items-center gap-1.5 text-amber-300 font-medium">
+                <Sun className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+                <span>Screen Sleep Prevented (Active)</span>
+              </span>
             </div>
           )}
 
