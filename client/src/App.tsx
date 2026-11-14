@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import { Navbar } from './components/Navbar';
 import { Radar } from './components/Radar';
 import { DropZone } from './components/DropZone';
@@ -285,6 +286,7 @@ export function App() {
         transfer={activeTransfer}
         onClose={() => setActiveTransfer(null)}
       />
+      <Analytics />
     </div>
   );
 }
