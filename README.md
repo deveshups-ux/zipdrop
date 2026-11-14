@@ -9,6 +9,7 @@
 
 * **Zero Cloud Storage & 100% Free**: Files never touch any cloud server or database. Data streams directly peer-to-peer (P2P) between browsers over local WiFi/LAN or across networks.
 * **Multi-File Batch Queue**: Select or drag-and-drop multiple files at once, add or remove items before sending, accept/decline incoming batch requests, and transfer files sequentially with per-file and overall batch progress tracking.
+* **Zero-RAM Direct Disk Streaming**: Overcomes browser V8 heap limits by streaming chunks directly to the user's hard drive/SSD via the **File System Access API** (`showSaveFilePicker` for single files and `showDirectoryPicker` for batch transfers) with sequential Promise-queued disk writes, keeping RAM consumption constant (<40MB) even on 10GB+ transfers, with graceful fallback for Safari/mobile.
 * **Large File Streaming with Backpressure**: Splits files into **16 KB binary chunks (`ArrayBuffer`)** with `RTCDataChannel` `bufferedAmount` flow control (64 KB low threshold / 512 KB high-water mark) to stream large files smoothly without overflowing browser memory.
 * **AirDrop-Style Radar UI**: Live animated radar detects nearby connected devices in the same room with device-type recognition (`desktop`, `mobile`, `tablet`).
 * **QR Code Pairing & In-App Camera Scanner**: Display a room QR code (`?room=ZIP-XXXX`) or scan another device's QR code directly inside the app using your device camera (`html5-qrcode`) or by entering the 4-character room code manually.

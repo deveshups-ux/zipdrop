@@ -1,6 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import type { BatchMeta, FileMeta, Peer, TransferProgress } from '../types';
-import { CHUNK_SIZE, formatBytes } from '../utils/helpers';
+import { CHUNK_SIZE, formatBytes, sanitizeFileName } from '../utils/helpers';
 
 // STUN and TURN configuration for 100% reliable NAT traversal across firewalls (Jio/Airtel 5G, College WiFi, etc.)
 function getIceServers(): RTCConfiguration {
@@ -57,14 +57,27 @@ export class WebRTCManager {
     chunks: ArrayBuffer[];
     bytesReceived: number;
     startTime: number;
+    writableStream?: any | null;
+    isStreamingToDisk?: boolean;
   } | null = null;
+
+  // File System Access API handles & sequential write queue for zero-RAM streaming
+  private destinationFileHandle: any | null = null;
+  private destinationDirHandle: any | null = null;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   // Event callbacks
   public onPeersUpdate?: (peers: Peer[]) => void;
   public onPeerJoined?: (peer: Peer) => void;
   public onPeerLeft?: (socketId: string) => void;
   public onProgress?: (progress: TransferProgress) => void;
-  public onFileReceived?: (fileName: string, blob: Blob, fileIndex: number, totalFiles: number) => void;
+  public onFileReceived?: (
+    fileName: string,
+    blob: Blob | null,
+    fileIndex: number,
+    totalFiles: number,
+    savedToDisk: boolean
+  ) => void;
   public onIncomingRequest?: (senderSocketId: string, batchMeta: BatchMeta) => void;
   public onTransferResponse?: (accepted: boolean) => void;
 
@@ -209,6 +222,11 @@ export class WebRTCManager {
     };
   }
 
+  public setReceiveDestination(destination: { fileHandle?: any; dirHandle?: any } | null) {
+    this.destinationFileHandle = destination?.fileHandle || null;
+    this.destinationDirHandle = destination?.dirHandle || null;
+  }
+
   // Handle incoming data (Header JSON, Binary Chunks, or Completion)
   private handleIncomingData(data: ArrayBuffer | string) {
     if (typeof data === 'string') {
@@ -227,7 +245,35 @@ export class WebRTCManager {
             chunks: [],
             bytesReceived: 0,
             startTime: Date.now(),
+            writableStream: null,
+            isStreamingToDisk: false,
           };
+
+          // Sequential write queue for initializing writable stream
+          this.writeQueue = this.writeQueue.then(async () => {
+            const batch = this.activeReceivingBatch;
+            if (!batch || batch.meta.id !== meta.id) return;
+
+            if (this.destinationFileHandle && message.fileIndex === 1) {
+              try {
+                batch.writableStream = await this.destinationFileHandle.createWritable();
+                batch.isStreamingToDisk = true;
+              } catch (err) {
+                console.warn('Failed to create writable stream from file handle, falling back to RAM:', err);
+                batch.isStreamingToDisk = false;
+              }
+            } else if (this.destinationDirHandle) {
+              try {
+                const cleanName = sanitizeFileName(meta.name);
+                const fileHandle = await this.destinationDirHandle.getFileHandle(cleanName, { create: true });
+                batch.writableStream = await fileHandle.createWritable();
+                batch.isStreamingToDisk = true;
+              } catch (err) {
+                console.warn('Failed to create writable stream from directory handle, falling back to RAM:', err);
+                batch.isStreamingToDisk = false;
+              }
+            }
+          });
 
           if (this.onProgress) {
             this.onProgress({
@@ -245,45 +291,62 @@ export class WebRTCManager {
               speed: '0 B/s',
               type: 'receiving',
               status: 'transferring',
+              isStreamingToDisk: Boolean(this.destinationFileHandle || this.destinationDirHandle),
             });
           }
         } else if (message.type === 'complete') {
-          const batch = this.activeReceivingBatch;
-          if (batch && batch.meta.id === message.fileId) {
-            const blob = new Blob(batch.chunks, { type: batch.meta.type || 'application/octet-stream' });
+          this.writeQueue = this.writeQueue.then(async () => {
+            const batch = this.activeReceivingBatch;
+            if (batch && batch.meta.id === message.fileId) {
+              const isLast = message.isLastFile;
+              let blob: Blob | null = null;
+              const wasStreamed = Boolean(batch.isStreamingToDisk && batch.writableStream);
 
-            const isLast = message.isLastFile;
+              if (wasStreamed) {
+                try {
+                  await batch.writableStream.close();
+                } catch (err) {
+                  console.error('Error closing writable stream:', err);
+                }
+                batch.writableStream = null;
+              } else {
+                blob = new Blob(batch.chunks, { type: batch.meta.type || 'application/octet-stream' });
+              }
 
-            if (this.onProgress) {
-              this.onProgress({
-                batchId: batch.batchId,
-                currentFileIndex: batch.fileIndex,
-                totalFiles: batch.totalFiles,
-                fileId: batch.meta.id,
-                fileName: batch.meta.name,
-                fileSize: batch.meta.size,
-                progress: 100,
-                totalBatchProgress: isLast ? 100 : Math.round(((batch.batchBytesPrior + batch.meta.size) / batch.totalBatchBytes) * 100),
-                bytesTransferred: batch.meta.size,
-                totalBytesTransferred: batch.batchBytesPrior + batch.meta.size,
-                totalBatchBytes: batch.totalBatchBytes,
-                speed: isLast ? 'All Done' : 'Next File...',
-                type: 'receiving',
-                status: isLast ? 'completed' : 'transferring',
-              });
+              if (this.onProgress) {
+                this.onProgress({
+                  batchId: batch.batchId,
+                  currentFileIndex: batch.fileIndex,
+                  totalFiles: batch.totalFiles,
+                  fileId: batch.meta.id,
+                  fileName: batch.meta.name,
+                  fileSize: batch.meta.size,
+                  progress: 100,
+                  totalBatchProgress: isLast ? 100 : Math.round(((batch.batchBytesPrior + batch.meta.size) / batch.totalBatchBytes) * 100),
+                  bytesTransferred: batch.meta.size,
+                  totalBytesTransferred: batch.batchBytesPrior + batch.meta.size,
+                  totalBatchBytes: batch.totalBatchBytes,
+                  speed: isLast ? 'All Done' : 'Next File...',
+                  type: 'receiving',
+                  status: isLast ? 'completed' : 'transferring',
+                  isStreamingToDisk: wasStreamed,
+                });
+              }
+
+              if (this.onFileReceived) {
+                this.onFileReceived(batch.meta.name, blob, batch.fileIndex, batch.totalFiles, wasStreamed);
+              }
+
+              // Clear chunks array immediately to release browser memory
+              batch.chunks = [];
+
+              if (isLast) {
+                this.activeReceivingBatch = null;
+                this.destinationFileHandle = null;
+                this.destinationDirHandle = null;
+              }
             }
-
-            if (this.onFileReceived) {
-              this.onFileReceived(batch.meta.name, blob, batch.fileIndex, batch.totalFiles);
-            }
-
-            // Clear chunks array immediately to release browser memory
-            batch.chunks = [];
-
-            if (isLast) {
-              this.activeReceivingBatch = null;
-            }
-          }
+          });
         }
       } catch (err) {
         console.error('Error parsing JSON message on data channel:', err);
@@ -291,8 +354,16 @@ export class WebRTCManager {
     } else if (data instanceof ArrayBuffer) {
       const batch = this.activeReceivingBatch;
       if (batch) {
-        batch.chunks.push(data);
         batch.bytesReceived += data.byteLength;
+
+        // Sequential write to disk stream or push to RAM chunks
+        this.writeQueue = this.writeQueue.then(async () => {
+          if (batch.isStreamingToDisk && batch.writableStream) {
+            await batch.writableStream.write(data);
+          } else {
+            batch.chunks.push(data);
+          }
+        });
 
         const filePercent = Math.min(100, Math.round((batch.bytesReceived / batch.meta.size) * 100));
         const totalBytesSoFar = batch.batchBytesPrior + batch.bytesReceived;
@@ -318,6 +389,7 @@ export class WebRTCManager {
             speed: speedFormatted,
             type: 'receiving',
             status: 'transferring',
+            isStreamingToDisk: Boolean(batch.isStreamingToDisk),
           });
         }
       }

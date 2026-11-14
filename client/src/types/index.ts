@@ -35,6 +35,7 @@ export interface TransferProgress {
   speed: string; // e.g. "14.2 MB/s"
   type: 'sending' | 'receiving';
   status: 'pending' | 'transferring' | 'completed' | 'cancelled' | 'error';
+  isStreamingToDisk?: boolean;
 }
 
 export interface PacketHeader {

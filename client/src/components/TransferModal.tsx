@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowUpRight, ArrowDownLeft, CheckCircle2, Zap, Files } from 'lucide-react';
+import { ArrowUpRight, ArrowDownLeft, CheckCircle2, Zap, Files, HardDrive } from 'lucide-react';
 import type { TransferProgress } from '../types';
 import { formatBytes } from '../utils/helpers';
 
@@ -73,6 +73,24 @@ export const TransferModal: React.FC<TransferModalProps> = ({ transfer, onClose 
               </span>
             </div>
           </div>
+
+          {/* Mode Pill for Zero-RAM vs Memory Buffer */}
+          {transfer.type === 'receiving' && (
+            <div className="mb-3 flex items-center justify-between px-3 py-1.5 rounded-xl bg-gray-950/80 border border-gray-800 text-[11px]">
+              <span className="text-gray-400">Pipeline</span>
+              {transfer.isStreamingToDisk ? (
+                <span className="flex items-center gap-1.5 text-cyan-300 font-medium">
+                  <HardDrive className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Direct Disk Stream (0-RAM)</span>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 text-amber-400/90 font-medium">
+                  <Files className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Memory Buffer (Blob)</span>
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Current File Card */}
           <div className="bg-gray-950/60 rounded-xl p-3 border border-gray-800/80 mb-4">

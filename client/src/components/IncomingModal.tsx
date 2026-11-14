@@ -1,8 +1,8 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { FileDown, Check, X, File } from 'lucide-react';
+import { FileDown, Check, X, File, HardDrive } from 'lucide-react';
 import type { BatchMeta } from '../types';
-import { formatBytes } from '../utils/helpers';
+import { formatBytes, isFileSystemAccessSupported } from '../utils/helpers';
 
 interface IncomingModalProps {
   request: { senderSocketId: string; batchMeta: BatchMeta } | null;
@@ -52,6 +52,19 @@ export const IncomingModal: React.FC<IncomingModalProps> = ({ request, onAccept,
             ))}
           </div>
         </div>
+
+        {/* Streaming Mode Notice */}
+        {isFileSystemAccessSupported() ? (
+          <div className="w-full flex items-center gap-2 mb-4 px-3 py-2 rounded-xl bg-cyan-950/40 border border-cyan-800/40 text-[11px] text-cyan-300">
+            <HardDrive className="w-4 h-4 shrink-0 text-cyan-400" />
+            <span>Zero-RAM Disk Stream: You'll choose destination upon accepting.</span>
+          </div>
+        ) : (
+          <div className="w-full flex items-center gap-2 mb-4 px-3 py-2 rounded-xl bg-gray-900 border border-gray-800 text-[11px] text-gray-400">
+            <FileDown className="w-4 h-4 shrink-0 text-gray-400" />
+            <span>Standard browser download mode active.</span>
+          </div>
+        )}
 
         <div className="w-full flex items-center gap-3">
           <button

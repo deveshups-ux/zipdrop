@@ -68,3 +68,12 @@ export function sanitizeFileName(fileName: string): string {
   }
   return clean || `file_${Date.now()}`;
 }
+
+export function isFileSystemAccessSupported(): boolean {
+  return typeof window !== 'undefined' && 'showSaveFilePicker' in window;
+}
+
+export function isDirectoryPickerSupported(): boolean {
+  return typeof window !== 'undefined' && 'showDirectoryPicker' in window;
+}
+

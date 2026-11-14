@@ -8,7 +8,7 @@ import { ScannerModal } from './components/ScannerModal';
 import { IncomingModal } from './components/IncomingModal';
 import { WebRTCManager } from './services/webrtc';
 import type { BatchMeta, Peer, TransferProgress } from './types';
-import { generateRoomCode, getDeviceDetails, sanitizeFileName } from './utils/helpers';
+import { generateRoomCode, getDeviceDetails, sanitizeFileName, isFileSystemAccessSupported, isDirectoryPickerSupported } from './utils/helpers';
 import { ShieldCheck, Wifi, Zap, Lock } from 'lucide-react';
 
 function getSignalingUrl(): string {
@@ -64,17 +64,24 @@ export function App() {
       setActiveTransfer(progress);
     };
 
-    manager.onFileReceived = (fileName, blob) => {
-      // Automatic download trigger for each received file
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const safeName = sanitizeFileName(fileName);
-      a.download = safeName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+    manager.onFileReceived = (fileName, blob, _fileIndex, _totalFiles, savedToDisk) => {
+      if (savedToDisk) {
+        console.log(`[Stream Complete] "${fileName}" streamed directly to disk (0-RAM).`);
+        return;
+      }
+
+      // Graceful Fallback: Automatic download trigger for browsers without File System Access API
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const safeName = sanitizeFileName(fileName);
+        a.download = safeName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
     };
 
     manager.onIncomingRequest = (senderSocketId, batchMeta) => {
@@ -154,9 +161,43 @@ export function App() {
     pendingBatchRef.current = { peer, files, batchMeta };
   };
 
-  const handleAcceptIncoming = () => {
+  const handleAcceptIncoming = async () => {
     if (!incomingRequest || !webrtcRef.current) return;
-    webrtcRef.current.respondTransfer(incomingRequest.senderSocketId, true);
+    const { senderSocketId, batchMeta } = incomingRequest;
+
+    let destination: { fileHandle?: any; dirHandle?: any } | null = null;
+
+    // Direct-to-Disk Streaming via File System Access API
+    if (isFileSystemAccessSupported()) {
+      try {
+        if (batchMeta.totalFiles === 1) {
+          const fileMeta = batchMeta.files[0];
+          // Prompt Native Save File Picker
+          // @ts-expect-error File System Access API
+          const fileHandle = await window.showSaveFilePicker({
+            suggestedName: sanitizeFileName(fileMeta.name),
+          });
+          destination = { fileHandle };
+        } else if (isDirectoryPickerSupported()) {
+          // Prompt Directory Picker so all files stream cleanly into one folder
+          // @ts-expect-error File System Access API
+          const dirHandle = await window.showDirectoryPicker({
+            mode: 'readwrite',
+          });
+          destination = { dirHandle };
+        }
+      } catch (err: any) {
+        if (err.name === 'AbortError') {
+          console.log('User cancelled folder picker; falling back to memory/download mode.');
+        } else {
+          console.warn('File system picker error, falling back to memory/download mode:', err);
+        }
+        // Fallback: destination remains null -> in-memory Blob collection
+      }
+    }
+
+    webrtcRef.current.setReceiveDestination(destination);
+    webrtcRef.current.respondTransfer(senderSocketId, true);
     setIncomingRequest(null);
   };
 
